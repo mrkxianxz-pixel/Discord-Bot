@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Collection } from 'discord.js';
+import { Client, GatewayIntentBits } from 'discord.js';
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } from '@discordjs/voice';
 import play from 'play-dl';
 
@@ -14,11 +14,20 @@ const client = new Client({
 // Map to store queues per guild
 const queues = new Map();
 
+// ---------------------- UTILITY: Clean YouTube URL ----------------------
+function cleanURL(url) {
+  if (url.includes("youtu.be/")) return url.split("?")[0]; // remove query parameters
+  if (url.includes("youtube.com/watch")) return url.split("&")[0]; // keep only v=VIDEOID
+  return url;
+}
+
+// ---------------------- READY EVENT ----------------------
 client.once('ready', () => {
   if (client.user) console.log(`Logged in as ${client.user.tag}!`);
   else console.error("Client.user is undefined. Check your token.");
 });
 
+// ---------------------- MESSAGE COMMANDS ----------------------
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
 
@@ -28,12 +37,93 @@ client.on('messageCreate', async (message) => {
   const args = message.content.slice(prefix.length).trim().split(/ +/);
   const command = args.shift().toLowerCase();
 
-  // ---------------------- PLAY COMMAND ----------------------
+  // ---------------------- PLAY ----------------------
   if (command === 'play') {
-    const url = args[0];
-    if (!url) return message.reply('Please provide a YouTube URL!');
+    if (!args[0]) return message.reply('Please provide a YouTube URL!');
+    const url = cleanURL(args[0]);
 
-    // Validate URL
+    if (!play.yt_validate(url)) return message.reply('Invalid YouTube URL!');
+
+    const channel = message.member.voice.channel;
+    if (!channel) return message.reply('Join a voice channel first!');
+
+    const connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: message.guild.id,
+      adapterCreator: message.guild.voiceAdapterCreator,
+    });
+
+    if (!queues.has(message.guild.id)) queues.set(message.guild.id, []);
+    const queue = queues.get(message.guild.id);
+
+    queue.push({ url, requestedBy: message.author.tag });
+    message.reply(`Added to queue: ${url}`);
+
+    if (queue.length === 1) playNext(message.guild.id, connection, message);
+  }
+
+  // ---------------------- SKIP ----------------------
+  if (command === 'skip') {
+    const queue = queues.get(message.guild.id);
+    if (!queue || queue.length === 0) return message.reply('Nothing is playing!');
+    queue.shift();
+    const connection = joinVoiceChannel({
+      channelId: message.member.voice.channel.id,
+      guildId: message.guild.id,
+      adapterCreator: message.guild.voiceAdapterCreator,
+    });
+    playNext(message.guild.id, connection, message);
+    message.reply('Skipped current song!');
+  }
+
+  // ---------------------- STOP ----------------------
+  if (command === 'stop') {
+    queues.set(message.guild.id, []);
+    message.reply('Stopped music and cleared the queue.');
+  }
+});
+
+// ---------------------- PLAY NEXT SONG FUNCTION ----------------------
+async function playNext(guildId, connection, message) {
+  const queue = queues.get(guildId);
+  if (!queue || queue.length === 0) return connection.destroy();
+
+  const song = queue[0];
+
+  try {
+    const streamInfo = await play.stream(song.url);
+    const resource = createAudioResource(streamInfo.stream, { inputType: streamInfo.type });
+    const player = createAudioPlayer();
+
+    player.play(resource);
+    connection.subscribe(player);
+
+    player.on(AudioPlayerStatus.Idle, () => {
+      queue.shift();
+      playNext(guildId, connection, message);
+    });
+
+    player.on('error', (error) => {
+      console.error('AudioPlayerError:', error);
+      queue.shift();
+      playNext(guildId, connection, message);
+    });
+
+    message.channel.send(`Now playing: ${song.url} (requested by ${song.requestedBy})`);
+  } catch (err) {
+    console.error('Failed to play song:', err);
+    message.channel.send(`Failed to play: ${song.url}`);
+    queue.shift();
+    playNext(guildId, connection, message);
+  }
+}
+
+// ---------------------- ERROR LOGGING ----------------------
+client.on('error', console.error);
+process.on('unhandledRejection', console.error);
+
+// ---------------------- LOGIN ----------------------
+client.login(process.env.DISCORD_TOKEN);
     if (!play.yt_validate(url)) return message.reply('Invalid YouTube URL!');
 
     const channel = message.member.voice.channel;
